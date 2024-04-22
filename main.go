@@ -21,10 +21,11 @@ type Resolver struct {
 
 func main() {
 	serversFile := flag.String("servers", "", "File containing the list of DNS servers")
-	threads := flag.Int("threads", 1, "Number of concurrent threads")
-	timeout := flag.Int("timeout", 5, "Timeout in seconds for DNS resolution")
+	threads := flag.Int("threads", 20, "Number of concurrent threads")
+	timeout := flag.Int("timeout", 200, "Timeout in milliseconds for connect")
 	rootDomain := flag.String("root", "example.com", "Root domain to resolve")
 	outputFile := flag.String("o", "", "Output file to write the sorted resolvers")
+	maxResponseTime := flag.Int("max", 0, "Maximum response time in milliseconds")
 	flag.Parse()
 
 	if *serversFile == "" {
@@ -39,13 +40,13 @@ func main() {
 	}
 
 	hardcodedResolver := "1.1.1.1:53"
-	expectedIP, err := resolve(hardcodedResolver, *rootDomain, time.Duration(*timeout)*time.Second)
+	expectedIP, err := resolve(hardcodedResolver, *rootDomain, 5*time.Second)
 	if err != nil {
 		fmt.Printf("Error resolving IP using hardcoded resolver: %v\n", err)
 		os.Exit(1)
 	}
 
-	resolvers := validateResolvers(servers, *rootDomain, expectedIP, *threads, time.Duration(*timeout)*time.Second)
+	resolvers := validateResolvers(servers, *rootDomain, expectedIP, *threads, time.Duration(*timeout)*time.Millisecond, time.Duration(*maxResponseTime)*time.Millisecond)
 
 	printResolvers(resolvers)
 
@@ -117,7 +118,12 @@ func resolve(resolver, domain string, timeout time.Duration) (string, error) {
 			return
 		}
 
-		resultChan <- resp.Answer[0].(*dns.A).A.String()
+		a, ok := resp.Answer[0].(*dns.A)
+		if !ok {
+			errChan <- fmt.Errorf("failed to cast to dns.A")
+			return
+		}
+		resultChan <- a.A.String()
 	}()
 
 	select {
@@ -130,7 +136,7 @@ func resolve(resolver, domain string, timeout time.Duration) (string, error) {
 	}
 }
 
-func validateResolvers(servers []string, rootDomain, expectedIP string, threads int, timeout time.Duration) []Resolver {
+func validateResolvers(servers []string, rootDomain, expectedIP string, threads int, timeout time.Duration, maxResponseTime time.Duration) []Resolver {
 	var resolvers []Resolver
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -172,6 +178,15 @@ func validateResolvers(servers []string, rootDomain, expectedIP string, threads 
 	sort.Slice(resolvers, func(i, j int) bool {
 		return resolvers[i].Time < resolvers[j].Time
 	})
+
+	if maxResponseTime > 0 {
+		for i := 0; i < len(resolvers); i++ {
+			if resolvers[i].Time > maxResponseTime {
+				resolvers = resolvers[:i]
+				break
+			}
+		}
+	}
 
 	return resolvers
 }
